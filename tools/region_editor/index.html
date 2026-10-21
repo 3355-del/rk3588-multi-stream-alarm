@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>项目一 · 警戒区设置</title><link rel="stylesheet" href="/editor.css"></head>
+<body><header><div><small>RK3588 · 视频告警系统</small><h1>警戒区设置</h1></div><span id="dirty">正在加载</span></header>
+<main><section class="viewer"><div class="bar"><label>视频通道 <select id="stream"></select></label><button id="sample">示例画面</button><label class="button">导入图片 / 视频<input id="media" type="file" accept="image/*,video/*" hidden></label><button id="capture">从板卡取一帧</button></div>
+<p id="source">示例画面用于测试划区，不进行目标识别。</p><div class="canvas-wrap"><canvas id="canvas" aria-label="警戒区画布"></canvas></div>
+<div class="bar"><button id="pause">播放 / 暂停视频</button><label><input id="processed" type="checkbox">素材已是检测截图（不再旋转、补边）</label></div>
+<p id="coords">点击“新建区域”后，在画面上依次点击顶点。</p>
+<details><summary>坐标与判断规则</summary><p>画面左上角为 (0,0)。原始素材按配置旋转 180°（如启用），再等比缩放、取偶数尺寸、居中补黑边，与项目一预处理坐标一致。已处理的截图必须与检测尺寸相同。</p><p>目标框的中心在多边形内或边界上才满足区域条件。下面的测试点仅检验几何关系，不代表目标检测。</p></details></section>
+<aside><h2>区域规则</h2><label>当前区域<select id="region"></select></label><div class="bar"><button id="add">＋ 新建区域</button><button id="delete">删除区域</button></div><div class="bar"><button id="finish">完成绘制</button><button id="undo">撤销顶点</button></div>
+<p>绘制结束后可拖动圆点修改边界。保存前会检查边线交叉、重复点及面积。</p>
+<label>关注类别<select id="preset"><option value="0">人（0）</option><option value="2">汽车（2）</option><option value="1,2,3">自行车 / 汽车 / 摩托车</option><option value="">模型支持的所有类别</option><option value="custom">自定义类别 ID</option></select></label>
+<label>类别 ID（逗号分隔，留空表示全部）<input id="classes" placeholder="例如：0,2"></label><small>上述名称按 COCO 顺序；自定义模型必须核对自己的类别表。</small>
+<label>告警冷却时间（毫秒）<input id="cooldown" type="number" min="0" step="1" value="5000"></label>
+<label><input id="probe" type="checkbox">点击画面测试中心点是否在区域内</label><p id="probeResult">未测试</p>
+<hr><button id="save" class="primary">保存区域配置</button><button id="reload">重新加载配置</button><p id="status" role="status" aria-live="polite"></p><p class="notice">生效方式：保存后，检测程序下次使用此配置启动时生效。当前不支持运行中热更新。</p></aside>
+</main><footer id="path"></footer><script src="/editor.js"></script></body></html>

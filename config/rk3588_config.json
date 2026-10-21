@@ -1,0 +1,39 @@
+{
+  "frame_width": 640,
+  "frame_height": 640,
+  "capture_width": 640,
+  "capture_height": 480,
+  "hardware": true,
+  "model_path": "model/model.rknn",
+  "camera_flip_180": true,
+  "queue_capacity": 8,
+  "alarm_queue_capacity": 8,
+  "fps": 30,
+  "run_seconds": 60,
+  "screenshot_dir": "screenshots",
+  "alarm": {
+    "host": "127.0.0.1",
+    "port": 9000,
+    "reliable": true,
+    "outbox_dir": "alarm_outbox"
+  },
+  "streams": [
+    {
+      "id": 0,
+      "source_uri": "/dev/video0",
+      "regions": [
+        {
+          "id": 0,
+          "cooldown_ms": 5000,
+          "classes": [0],
+          "polygon": [
+            [160, 200],
+            [480, 200],
+            [480, 520],
+            [160, 520]
+          ]
+        }
+      ]
+    }
+  ]
+}
