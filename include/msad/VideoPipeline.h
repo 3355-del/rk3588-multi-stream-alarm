@@ -39,7 +39,9 @@ namespace msad {
 class VideoPipeline {
 public:
     using ScreenshotWriter = std::function<bool(const Frame&, const std::string&, const std::vector<Detection>&)>;
-    explicit VideoPipeline(const AppConfig& cfg, ScreenshotWriter writer = {});
+    using ResultObserver = std::function<void(const DetectResult&)>;
+    explicit VideoPipeline(const AppConfig& cfg, ScreenshotWriter writer = {},
+                           ResultObserver observer = {}, bool previewOnly = false);
     ~VideoPipeline();
 
     /* 创建所有线程并启动流水线 */
@@ -97,6 +99,8 @@ private:
 
     AppConfig cfg_;
     ScreenshotWriter screenshotWriter_;
+    ResultObserver observer_;
+    bool previewOnly_ = false;
     std::atomic<uint64_t> alarmSequence_{0}; // Not reset between starts of this instance.
     std::atomic<bool> running_{false};
     std::atomic<bool> failed_{false};

@@ -36,3 +36,7 @@ outputs/
 *.bak
 config/region_editor_offline.json
 config/region_editor_offline.json.*
+
+# Live console runtime and incomplete transfers
+alarm_outbox_live/
+*.upload

@@ -34,8 +34,9 @@
 
 namespace msad {
 
-VideoPipeline::VideoPipeline(const AppConfig& cfg, ScreenshotWriter writer)
-    : cfg_(cfg), screenshotWriter_(writer ? std::move(writer) : ScreenshotWriter(PngWriter::saveFrameAsPng)) {}
+VideoPipeline::VideoPipeline(const AppConfig& cfg, ScreenshotWriter writer, ResultObserver observer, bool previewOnly)
+    : cfg_(cfg), screenshotWriter_(writer ? std::move(writer) : ScreenshotWriter(PngWriter::saveFrameAsPng)),
+      observer_(std::move(observer)), previewOnly_(previewOnly) {}
 
 VideoPipeline::~VideoPipeline() {
     stop();
@@ -113,8 +114,10 @@ bool VideoPipeline::start() {
 
     /* 告警上报器（全局一个连接） */
     instanceId_ = uniqueEventId();
-    if (cfg_.alarm.reliable) notifier_ = std::make_unique<DurableAlarmNotifier>(cfg_.alarm.outboxDir);
-    else notifier_ = std::make_unique<TcpAlarmNotifier>();
+    if (!previewOnly_) {
+        if (cfg_.alarm.reliable) notifier_ = std::make_unique<DurableAlarmNotifier>(cfg_.alarm.outboxDir);
+        else notifier_ = std::make_unique<TcpAlarmNotifier>();
+    }
 
     /* 告警任务队列（供独立 IO 线程消费：写截图 + TCP 上报） */
     alarmTasks_ = std::make_unique<RingBuffer<AlarmTask>>(cfg_.alarmQueueCapacity);
@@ -142,8 +145,10 @@ bool VideoPipeline::start() {
             if(cfg_.streams[i].sourceUri.rfind("rtsp://",0)==0 || cfg_.streams[i].sourceUri.rfind("rtsps://",0)==0)
                 sources_[i]=std::make_unique<ReconnectingSource>(std::move(sources_[i]));
             processors_[i] = std::make_unique<RgaFrameProcessor>(cfg_.frameWidth, cfg_.frameHeight, cfg_.cameraFlip180,cfg_.dmaInput);
-            auto sharedModel=i?static_cast<RknnInferenceEngine*>(engines_[0].get())->sharedModel():std::shared_ptr<RknnModelContext>{};
-            engines_[i]    = std::make_unique<RknnInferenceEngine>(cfg_.modelPath, static_cast<float>(cfg_.confThresh),sharedModel,cfg_.nativeOutputs);
+            if (!previewOnly_) {
+                auto sharedModel=i?static_cast<RknnInferenceEngine*>(engines_[0].get())->sharedModel():std::shared_ptr<RknnModelContext>{};
+                engines_[i] = std::make_unique<RknnInferenceEngine>(cfg_.modelPath, static_cast<float>(cfg_.confThresh),sharedModel,cfg_.nativeOutputs);
+            }
         } else {
 #else
         {
@@ -162,7 +167,7 @@ bool VideoPipeline::start() {
             Logger::error("Pipeline", "stream " + std::to_string(i) + " open failed");
             stop(); return false;
         }
-        if (!processors_[i]->init() || !engines_[i]->init()) {
+        if (!processors_[i]->init() || (!previewOnly_ && !engines_[i]->init())) {
             Logger::error("Pipeline", "stream " + std::to_string(i) + " init failed");
             stop(); return false;
         }
@@ -186,7 +191,7 @@ bool VideoPipeline::start() {
     }
 
     /* 连接尝试最多等待约 500ms；失败后由后续告警重试。 */
-    if (!notifier_->connect(cfg_.alarm.host, cfg_.alarm.port)) {
+    if (notifier_ && !notifier_->connect(cfg_.alarm.host, cfg_.alarm.port)) {
         Logger::warn("Pipeline", "alarm server not reachable; not connected; reliable mode retries persisted alarms in the background");
     }
 
@@ -326,9 +331,10 @@ void VideoPipeline::inferLoop(int idx) {
         Frame f;
         if (!qPre2Inf_[idx]->pop(f)) break;
 
+        std::vector<Detection> dets;
+        if (!previewOnly_) {
         /* 并发门：限制同时推理的路数（默认 2） */
         if (!inferGate_->acquire()) break;
-        std::vector<Detection> dets;
         bool ok;
         try { ok = engines_[idx]->infer(f, dets); }
         catch (...) { inferGate_->release(); throw; }
@@ -338,11 +344,12 @@ void VideoPipeline::inferLoop(int idx) {
         /* 手写 NMS 抑制重叠框（阈值可配置，缺省 0.45） */
         dets = nms(dets, static_cast<float>(cfg_.nmsThresh));
 
-        DetectResult res;
         {
             std::lock_guard<std::mutex> statsLock(statsMtx_);
             ++stats_[idx].inferred;
         }
+        }
+        DetectResult res;
         res.timestampMs = f.timestampMs;
         res.streamId = f.streamId;
         res.frame = std::move(f);          /* 帧快照（告警截图用） */
@@ -358,7 +365,8 @@ void VideoPipeline::alarmLoop(int idx) {
     while (running_.load()) {
         DetectResult res;
         if (!qInf2Alarm_[idx]->pop(res)) break;
-        checkAndRaiseAlarm(idx, res);
+        if (observer_) observer_(res); // Before alarm handling can move the frame into a screenshot task.
+        if (!previewOnly_) checkAndRaiseAlarm(idx, res);
     }
     Logger::info("Pipeline", "alarm thread exit, stream=" + std::to_string(idx));
 }

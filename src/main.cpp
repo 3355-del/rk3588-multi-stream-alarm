@@ -19,6 +19,9 @@
 #include "msad/Config.h"
 #include "msad/Logger.h"
 #include "msad/VideoPipeline.h"
+#include "msad/PreviewPublisher.h"
+#include <iostream>
+#include <memory>
 
 namespace {
 
@@ -38,7 +41,23 @@ int main(int argc, char* argv[]) {
 
     /* 1. 解析配置路径 */
     std::string configPath = "config/demo_config.json";
-    if (argc > 1) configPath = argv[1];
+    std::string previewDirectory;
+    int previewFps = 3;
+    bool previewOnly = false;
+    try {
+        for (int i = 1; i < argc; ++i) {
+            const std::string arg = argv[i];
+            if (arg == "--preview-only") previewOnly = true;
+            else if (arg == "--preview-dir" && i + 1 < argc) previewDirectory = argv[++i];
+            else if (arg == "--preview-fps" && i + 1 < argc) previewFps = std::stoi(argv[++i]);
+            else if (arg == "--help") {
+                std::cout << "Usage: multi_stream_alarm_live [config.json] [--preview-dir DIR] [--preview-fps 1..5] [--preview-only]\n";
+                return 0;
+            } else if (arg.rfind("--", 0) == 0) throw std::runtime_error("unknown or incomplete option: " + arg);
+            else configPath = arg;
+        }
+        if (previewFps < 1 || previewFps > 5) throw std::runtime_error("preview fps must be 1..5");
+    } catch (const std::exception& error) { Logger::error("Main", error.what()); return EXIT_FAILURE; }
 
     /* 2. 加载配置 */
     AppConfig cfg;
@@ -57,7 +76,13 @@ int main(int argc, char* argv[]) {
     std::signal(SIGTERM, onSignal);
 
     /* 4. 构建并启动流水线 */
-    VideoPipeline pipeline(cfg);
+    std::unique_ptr<PreviewPublisher> preview;
+    try {
+        if (!previewDirectory.empty()) preview = std::make_unique<PreviewPublisher>(previewDirectory, previewFps);
+    } catch (const std::exception& error) { Logger::error("Preview", error.what()); return EXIT_FAILURE; }
+    VideoPipeline pipeline(cfg, {}, preview ? VideoPipeline::ResultObserver([&](const DetectResult& result) {
+        preview->submit(result);
+    }) : VideoPipeline::ResultObserver{}, previewOnly);
     if (!pipeline.start()) {
         Logger::error("Main", "pipeline start failed");
         return EXIT_FAILURE;
@@ -78,6 +103,7 @@ int main(int argc, char* argv[]) {
 
     /* 6. 优雅停止并释放资源 */
     pipeline.stop();
+    if (preview) preview->stop();
     Logger::info("Main", "demo finished");
     return pipeline.failed() ? EXIT_FAILURE : EXIT_SUCCESS;
 }

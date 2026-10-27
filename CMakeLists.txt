@@ -28,7 +28,7 @@ set(CORE_SOURCES
   src/hal/SimScene.cpp src/hal/MockVideoSource.cpp
   src/hal/MockFrameProcessor.cpp src/hal/MockInferenceEngine.cpp
   src/hal/DurableAlarmNotifier.cpp src/hal/TcpAlarmNotifier.cpp src/algo/Nms.cpp src/algo/PolygonRegion.cpp
-  src/algo/PngWriter.cpp src/app/Config.cpp src/pipeline/VideoPipeline.cpp)
+  src/algo/PngWriter.cpp src/app/Config.cpp src/app/PreviewPublisher.cpp src/pipeline/VideoPipeline.cpp)
 if(MSAD_ENABLE_RKNN)
   find_package(PkgConfig REQUIRED)
   # Proprietary SDK headers/libraries are external dependencies, never vendored.
@@ -73,6 +73,8 @@ if(WIN32)
 endif()
 add_executable(multi_stream_alarm_demo src/main.cpp)
 target_link_libraries(multi_stream_alarm_demo PRIVATE msad_core)
+add_executable(multi_stream_alarm_live src/main.cpp)
+target_link_libraries(multi_stream_alarm_live PRIVATE msad_core)
 add_subdirectory(module/decode_infer)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_subdirectory(module/voice_mq)
@@ -107,6 +109,10 @@ if(BUILD_TESTING)
   endif()
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_FOUND)
+    add_test(NAME live_console COMMAND ${Python3_EXECUTABLE} -B -X utf8 -m unittest discover
+      -s ${CMAKE_CURRENT_SOURCE_DIR}/tests -p test_live_console.py)
+    set_tests_properties(live_console PROPERTIES TIMEOUT 60
+      ENVIRONMENT "MSAD_LIVE_BINARY=$<TARGET_FILE:multi_stream_alarm_live>")
     add_test(NAME region_editor COMMAND ${Python3_EXECUTABLE} -B -m unittest discover
       -s ${CMAKE_CURRENT_SOURCE_DIR}/tests -p test_region_editor.py)
     add_test(NAME detection_score COMMAND ${Python3_EXECUTABLE} -B -m unittest discover

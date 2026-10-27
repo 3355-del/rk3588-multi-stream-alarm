@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>项目一 · 实时检测与划区</title><link rel="stylesheet" href="/app.css"></head>
+<body>
+<header><h1>RK3588 视频告警</h1><span id="backend">正在连接控制台…</span><a href="#help">操作说明</a></header>
+<main>
+ <div class="title"><div><h2>实时检测与划区</h2><p id="summary">打开页面不会开启摄像头。由你点击启动。</p></div><strong id="state" role="status">连接中</strong></div>
+ <div class="toolbar" aria-label="运行控制">
+  <label>视频通道 <select id="stream" aria-label="视频通道"></select></label>
+  <button id="preview">启动预览</button><button id="detect" class="primary">启动检测与告警</button><button id="stop">停止采集与检测</button>
+  <button id="freeze" aria-pressed="false">冻结画面划区</button>
+ </div>
+ <p id="message" role="status" aria-live="polite">正在读取配置…</p>
+ <div class="workspace">
+  <section class="view" aria-label="当前通道画面">
+   <div class="video"><canvas id="canvas" tabindex="0" aria-label="检测画面。冻结后点击添加顶点，或拖动已有顶点。键盘可用下方坐标表修改。"></canvas><div id="empty">摄像头未启动<br><small>点击“启动预览”取景，或“启动检测与告警”查看真实检测框。</small></div></div>
+   <div class="caption"><span id="frameInfo">尚无画面</span><span>预览上限 3 帧/秒，独立于推理速度</span></div>
+   <p id="match">尚未检测。黄框表示目标中心在关注区域内；是否产生新告警以入库事件为准。</p>
+   <section class="events"><h3>最近已入库告警</h3><p>区域命中会受类别与冷却时间限制；这里展示数据库实际记录。</p><ol id="alarms"><li>暂无已入库告警</li></ol></section>
+  </section>
+  <aside aria-label="警戒区规则">
+   <h3>警戒区规则</h3><p id="dirty">读取中</p>
+   <button id="save" class="primary wide">保存并应用规则</button>
+   <fieldset id="rules"><legend class="sr-only">编辑当前通道规则</legend>
+    <label>当前区域<select id="region"></select></label>
+    <div class="buttons"><button id="add">新建区域</button><button id="delete">删除区域</button><button id="finish">完成绘制</button><button id="undo">撤销顶点</button></div>
+    <p class="hint">先冻结画面，依次点击至少 3 个顶点，再完成绘制。修改后的规则需保存应用。</p>
+    <label>关注类别<select id="preset"><option value="0">人（0）</option><option value="2">汽车（2）</option><option value="1,2,3">非机动车 / 机动车（1,2,3）</option><option value="">全部类别</option><option value="custom">自定义类别 ID</option></select></label>
+    <label>类别 ID（逗号分隔，留空为全部）<input id="classes" inputmode="numeric" autocomplete="off"></label>
+    <label>告警冷却时间（毫秒）<input id="cooldown" type="number" min="0" max="2147483647" step="1"></label>
+    <label>摄像头方向<select id="rotation"><option value="false">正向</option><option value="true">旋转 180°</option></select></label>
+    <p class="hint">方向会同时作用于模型输入、预览与截图；保存时同步转换区域坐标。</p>
+    <details><summary>精确修改顶点坐标</summary><div id="vertices"></div></details>
+   </fieldset>
+   <button id="reload" class="wide">放弃修改并重新加载</button>
+   <p class="hint">运行时应用会短暂停顿并重启当前模式。原始配置保留，新控制台使用独立配置。</p>
+  </aside>
+ </div>
+ <details class="logs"><summary>运行日志与错误排查</summary><pre id="logs">尚未启动</pre></details>
+ <section id="help"><h3>在一个页面完成操作</h3><ol><li>点击“启动预览”，调整摄像头朝向；如果倒置，在右侧切换方向并保存。</li><li>点击“冻结画面划区”，新建区域或拖动顶点，再点击“保存并应用规则”。</li><li>点击“恢复实时画面”，再点击“启动检测与告警”。检测框与画面来自同一帧，区域内目标用黄框显示。</li><li>查看“最近已入库告警”。演示结束点击“停止采集与检测”；关闭网页本身不会停止板卡。</li></ol><p id="path"></p></section>
+</main><script src="/app.js"></script></body></html>
