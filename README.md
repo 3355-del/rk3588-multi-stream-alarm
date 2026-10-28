@@ -6,7 +6,9 @@ RK3588 上的多路视频边缘 AI 目标检测告警系统，板端完成解码
 
 ## 运行截图：板卡摄像头与交互划区
 
-![Orange Pi 5 实际运行的统一控制台：摄像头预览、正向图像和可编辑多边形警戒区](docs/images/board-live-preview.jpg)
+![Orange Pi 5 实际运行的统一控制台：摄像头预览、正向图像和可编辑多边形警戒区](https://raw.githubusercontent.com/3355-del/rk3588-multi-stream-alarm/4df3e035d0d90df2b7ce997bd62756dbde3f5d7e/docs/images/board-live-preview.jpg)
+
+[查看运行截图原图](https://raw.githubusercontent.com/3355-del/rk3588-multi-stream-alarm/4df3e035d0d90df2b7ce997bd62756dbde3f5d7e/docs/images/board-live-preview.jpg)
 
 2026-10-27 板卡真实运行截图，当前为 **预览模式（无推理）**；冻结的是网页显示，便于拖动顶点，不是检测框或精度评测。网页提供启动预览、冻结划区、保存应用、启动检测与告警、查看实际入库事件及截图、停止采集。截图仅保留经检查的演示画面，隐藏历史告警与诊断信息。
 
