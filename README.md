@@ -18,13 +18,13 @@ RK3588 上的多路视频边缘 AI 目标检测告警系统，板端完成解码
 
 ### 从视频输入到告警
 
-![多路视频流水线：输入源经过采集、有界队列、RGA 预处理、RKNN 推理、区域告警，再由独立 I/O 线程保存截图和发送事件](docs/images/video-pipeline.png)
+![多路视频流水线：输入源经过采集、有界队列、RGA 预处理、RKNN 推理、区域告警，再由独立 I/O 线程保存截图和发送事件](https://raw.githubusercontent.com/3355-del/rk3588-multi-stream-alarm/0cf17dbc50aa847560d36ab6eb83766f17b2f207/docs/images/video-pipeline.png)
 
 每路处理分阶段运行，阶段之间使用有界队列；当队列满时丢弃最旧帧，避免持续积压。硬件路径和 mock 共用业务流水线，但 mock 不验证真实模型精度。DMA-BUF 只覆盖部分硬件路径，并非端到端零拷贝。源码：[流水线](src/pipeline/VideoPipeline.cpp)。
 
 ### 事件如何确认与重试
 
-![可靠告警投递：事件先写本地 outbox，再通过 TCP 发送；接收端按 event_id 去重并提交 SQLite 后返回 ACK，发送端确认后删除待发记录](docs/images/alarm-delivery.png)
+![可靠告警投递：事件先写本地 outbox，再通过 TCP 发送；接收端按 event_id 去重并提交 SQLite 后返回 ACK，发送端确认后删除待发记录](https://raw.githubusercontent.com/3355-del/rk3588-multi-stream-alarm/0cf17dbc50aa847560d36ab6eb83766f17b2f207/docs/images/alarm-delivery.png)
 
 此图对应启用 reliable 的告警配置：接收端提交后才确认，发送端未获确认会保留待发事件并重试。待发事件设有数量上限，仍需管理磁盘容量与故障。截图留在本地，TCP 协议传输事件及截图文件名，不传输截图或视频本体。源码：[持久化发送器](src/hal/DurableAlarmNotifier.cpp)、[接收端](tools/alarm_receiver.py)。
 
