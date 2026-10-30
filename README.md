@@ -70,6 +70,8 @@ USB(V4L2) / 本地视频、RTSP(FFmpeg 解复用 + MPP 硬解)
 
 模型来源边界：原项目 README 记录历史使用的已导出模型为 `agricultureiot/rknn-yolo` 的 YOLOv11n，输出布局兼容本项目的 YOLOv8 风格后处理。因此上述数据不标为自行转换 YOLOv8n 的实测成果。
 
+新增路径回归与精度验证方法见 [检测质量排查](docs/detection-quality.md)。2026-10-30 正向、180°各12帧路径一致性检查通过；这不代表现场漏检已修复。
+
 ## 4. 运行环境
 
 历史验证环境：Orange Pi 5（RK3588S，8 GB）/ Ubuntu 22.04.5 / 内核 6.1.99 / RKNPU 驱动 0.9.8 / RKNN Runtime 2.3.0 / 自建 MPP（commit `14729dd578e570e5f00fd1dd2113f5429012d64b`）。
