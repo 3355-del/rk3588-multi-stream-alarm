@@ -1,61 +1,43 @@
 # RK3588 多路边缘目标检测告警系统
 
-## 1. 项目定位
+## 1. 做什么
 
-RK3588 上的多路视频边缘 AI 目标检测告警系统，板端完成解码/预处理/推理/告警，只上报事件不上传视频。C++17 实现，提供无硬件 mock 模式与板卡真实 HAL。
+在 RK3588 上接入多路视频，完成目标检测和多边形区域告警。C++17 实现采集、预处理、推理、告警四阶段流水线，独立 IO 线程负责截图和事件投递。TCP 只上报事件，视频留在板端。
 
-## 运行截图：真实摄像头检测与告警
+## 运行画面
 
-![Orange Pi 5 真实摄像头检测：bottle 检测框、多边形警戒区与实际入库告警同屏](docs/images/board-camera-detection-20261030.jpg)
+![板卡摄像头检测水瓶，显示警戒区、检测框和入库告警](docs/images/board-camera-detection-20261030.jpg)
 
-[查看运行截图原图](docs/images/board-camera-detection-20261030.jpg)
+现场水瓶对应 COCO 类别 39。网页可以冻结画面拖动警戒区顶点，再保存并应用规则；冻结显示时，板卡仍在检测。操作见[实时控制台](docs/live-console.md)。
 
-2026-10-30 在 Orange Pi 5 上实际运行 V4L2 → RGA → RKNN → 区域告警链路。画面中为现场水瓶，类别 **bottle（39）**；黄色检测框、警戒区和下方 SQLite 新告警均来自实际运行。截图时只冻结网页显示，板卡检测仍在运行；截取后已停止采集和推理。
+调试这次水瓶演示时，程序先报了 `mock class id must be an integer 0..4`。隔离部署还在用旧解析器，把硬件类别也限制成了模拟模式的五类。修正后，硬件允许 0–79，mock 保持 0–4；CTest 8/8 和类别边界专项 10/10 通过，随后产生了新的水瓶告警。[运行记录](docs/board-run-20261030.md)
 
-截图中单帧置信度约 **31%**，首次新增告警置信度约 **32.8%**，它们不是准确率指标。本次仍观察到漏检与类别波动，未做标注数据集评测，不以一张成功截图代表稳定精度。
-
-操作步骤见 [统一实时控制台](docs/live-console.md)，本次测试与修复记录见 [板卡运行验证](docs/board-run-20261030.md)。画面仅经用户主动建立的访问通道提供，原 TCP 告警协议只传事件及截图路径，不自动向云端上传视频。
-
-历史对照：[仅预览、无推理的旧截图](docs/images/board-live-preview.jpg)、[夜间暗场 0 目标截图](docs/images/board-detect-night-20261030.jpg)。两者均不作为成功检出证据。另一次已有文件源检查检出目标并写入 1 条告警，结果与现场摄像头分开记录。
-
-## 图解：视频处理与告警投递
-
-下面两张图按当前源码绘制，展示处理流程与可靠投递机制；它们是**工程流程示意，不是实际摄像头画面或新性能测试结果**。
-
-### 从视频输入到告警
-
-![多路视频流水线：输入源经过采集、有界队列、RGA 预处理、RKNN 推理、区域告警，再由独立 I/O 线程保存截图和发送事件](https://raw.githubusercontent.com/3355-del/rk3588-multi-stream-alarm/0cf17dbc50aa847560d36ab6eb83766f17b2f207/docs/images/video-pipeline.png)
-
-每路处理分阶段运行，阶段之间使用有界队列；当队列满时丢弃最旧帧，避免持续积压。硬件路径和 mock 共用业务流水线，但 mock 不验证真实模型精度。DMA-BUF 只覆盖部分硬件路径，并非端到端零拷贝。源码：[流水线](src/pipeline/VideoPipeline.cpp)。
-
-### 事件如何确认与重试
-
-![可靠告警投递：事件先写本地 outbox，再通过 TCP 发送；接收端按 event_id 去重并提交 SQLite 后返回 ACK，发送端确认后删除待发记录](https://raw.githubusercontent.com/3355-del/rk3588-multi-stream-alarm/0cf17dbc50aa847560d36ab6eb83766f17b2f207/docs/images/alarm-delivery.png)
-
-此图对应启用 reliable 的告警配置：接收端提交后才确认，发送端未获确认会保留待发事件并重试。待发事件设有数量上限，仍需管理磁盘容量与故障。截图留在本地，TCP 协议传输事件及截图文件名，不传输截图或视频本体。源码：[持久化发送器](src/hal/DurableAlarmNotifier.cpp)、[接收端](tools/alarm_receiver.py)。
-
-事件入库后，可由配套的[离线多模态助手](https://github.com/3355-del/rk3588-offline-agent)查询与关联截图；需自行配置共享数据路径。
-
-## 2. 架构与数据流
+## 2. 数据流
 
 ```text
-USB(V4L2) / 本地视频、RTSP(FFmpeg 解复用 + MPP 硬解)
-  → 采集 → 有界队列 → 预处理(RGA letterbox)
-  → 有界队列 → 推理(RKNN INT8、DFL、NMS)
-  → 有界队列 → 告警(多边形区域、冷却时间)
-  → 独立 IO 线程：PNG 截图、本地待发队列、TCP JSON + ACK
-  → Python 接收端：SQLite 提交后确认，按 event_id 去重
+USB（V4L2）/ 文件、RTSP（FFmpeg 解复用 + MPP 硬解）
+  → 采集 → 有界队列 → RGA 预处理
+  → 有界队列 → RKNN 推理、DFL 解码、NMS
+  → 有界队列 → 多边形区域判断、告警冷却
+  → 独立 IO 线程：PNG 截图、持久化 outbox、TCP JSON + ACK
+  → Python 接收端：按 event_id 去重，SQLite 提交后返回 ACK
 ```
 
-四阶段流水线加独立 IO 线程；队列满时丢最旧帧。MPP → RGA → RKNN 使用 DMA-BUF，USB 采集和截图仍有拷贝。使用 `rknn_dup_context` 复用模型上下文；并发门限和队列限制资源占用。截图留在本地，接收端保存事件及截图路径，不通过此协议传输视频。
+![视频流水线](docs/images/video-pipeline.png)
 
-`include/` 为接口，`src/hal/` 为真实与模拟后端，`src/pipeline/` 为流水线，`src/algo/` 为后处理，`tools/` 为接收端、验证及划区工具。`module/` 保留构建和回归依赖的模拟练习模块，不代表额外硬件实测能力。
+每路按阶段分线程运行，队列满时丢最旧帧，避免延迟不断累积。`rknn_dup_context` 共享模型上下文，并发门限限制同时推理的数量。MPP、RGA、RKNN 之间使用 DMA-BUF，USB 采集和截图仍有拷贝。
 
-## 3. 关键指标
+![告警持久化、确认与重试流程](docs/images/alarm-delivery.png)
 
-以下为作者提供的历史板卡实测记录（Orange Pi 5 / RK3588S / 8 GB），不是本次整理重新测得，也不保证更换模型、素材后复现相同吞吐。原始影像和日志不公开。
+告警先写本地 outbox；接收端写库成功才发 ACK，未确认的事件保留重试。截图留在本地，TCP 传事件和截图路径。配套的[离线助手](https://github.com/3355-del/rk3588-offline-agent)可读取同一告警库。
 
-| 项目 | 实测结果 |
+源码入口：[流水线](src/pipeline/VideoPipeline.cpp)、[可靠投递](src/hal/DurableAlarmNotifier.cpp)、[接收端](tools/alarm_receiver.py)。`include/` 放接口，`src/hal/` 放硬件与模拟后端，`tests/`、`tools/` 放回归和辅助工具；`module/` 保留构建依赖的练习模块。
+
+## 3. 板卡测试
+
+测试板为 Orange Pi 5，RK3588S，8 GB。
+
+| 项目 | 结果 |
 | --- | --- |
 | 单路同素材 20 秒分组对照 | CPU 预处理+浮点输出 25.39 FPS → DMA-BUF 输入+直读量化输出 35.05 FPS（+38%） |
 | 取帧 / 解码耗时 | 4.9 → 1.33 ms；9.4 → 3.6 ms |
@@ -63,24 +45,22 @@ USB(V4L2) / 本地视频、RTSP(FFmpeg 解复用 + MPP 硬解)
 | 四路文件源 | 合计约 67.4 FPS |
 | RTSP 回环 | 约 16.28 FPS |
 | 摄像头 + 文件双路 | 连续 3600.7 秒无崩溃，115 条告警入库，两路丢帧 0 / 508 |
-| 历史验证 | ASan 覆盖截图路径未报告内存错误（未启用泄漏检测）；CTest 4/4 通过 |
-| DMA/CPU 输入与 INT8/float 检测等价性 | 12 帧，detections=89，PASS |
+| 截图路径 / 回归 | ASan 未报告内存错误（未启用泄漏检测）；历史 CTest 4/4 通过 |
+| DMA/CPU 输入与 INT8/float 等价性 | 12 帧，detections=89，PASS |
 
-耗时术语说明：上表沿用原指标简称，“取帧”实际指获取推理输出，“解码”指检测输出后处理，不是摄像头取帧与 MPP 视频解码耗时。当前测试集比历史 4 项更多，本次验证结果另见仓库外检查报告。
+表中的“取帧”指获取推理输出，“解码”指检测输出后处理。2026-10-30 又补测了 180° 路径：正向和旋转各 12 帧，路径一致性检查通过。[复现方法](docs/detection-quality.md)
 
-模型来源边界：原项目 README 记录历史使用的已导出模型为 `agricultureiot/rknn-yolo` 的 YOLOv11n，输出布局兼容本项目的 YOLOv8 风格后处理。因此上述数据不标为自行转换 YOLOv8n 的实测成果。
+## 4. 环境
 
-新增路径回归与精度验证方法见 [检测质量排查](docs/detection-quality.md)。2026-10-30 正向、180°各12帧路径一致性检查通过；这不代表现场漏检已修复。
+Orange Pi 5 / Ubuntu 22.04.5 / 内核 6.1.99 / RKNPU 驱动 0.9.8 / RKNN Runtime 2.3.0。MPP 使用自建版本，commit `14729dd578e570e5f00fd1dd2113f5429012d64b`。
 
-## 4. 运行环境
+硬件构建在板卡上进行，需要 RKNN、RGA、MPP、FFmpeg 开发环境。无硬件构建需要 CMake ≥3.16、C++17 和 Python ≥3.10；Windows 可用 MinGW + Ninja。[依赖说明](docs/dependencies.md)
 
-历史验证环境：Orange Pi 5（RK3588S，8 GB）/ Ubuntu 22.04.5 / 内核 6.1.99 / RKNPU 驱动 0.9.8 / RKNN Runtime 2.3.0 / 自建 MPP（commit `14729dd578e570e5f00fd1dd2113f5429012d64b`）。
+## 5. 构建与运行
 
-硬件模式需在板卡上构建，另装 RGA、MPP、FFmpeg 开发包及匹配的 RKNN SDK。仓库不携带 SDK 头文件、库或模型。无硬件模式需要 CMake ≥3.16、C++17 编译器、Python ≥3.10；Windows 可用 MinGW + Ninja。
+### 先在电脑跑通模拟链路
 
-## 5. 构建与复现
-
-在仓库根执行以下命令。Windows 先将 CMake、Ninja、GCC 和 Python 加入 PATH；Linux 可去掉 `-G Ninja` 使用默认生成器。
+在仓库根目录执行；Linux 可去掉 `-G Ninja`：
 
 ```sh
 cmake -S . -B build -G Ninja -DMSAD_ENABLE_RKNN=OFF -DBUILD_TESTING=ON
@@ -88,21 +68,19 @@ cmake --build build --parallel 2
 ctest --test-dir build --output-on-failure
 ```
 
-终端一启动接收端（保持运行）：
+终端一运行接收器，保持窗口开启：
 
 ```sh
 python tools/alarm_receiver.py --host 127.0.0.1 --port 9000 --db data/alarms.sqlite3
 ```
 
-终端二运行 5 秒模拟演示：
+终端二运行五秒演示（Windows 使用 `.exe`）：
 
 ```sh
 ./build/multi_stream_alarm_demo config/demo_config.json
 ```
 
-Windows 可使用 `./build/multi_stream_alarm_demo.exe`。该模式生成模拟检测、截图和告警，用于验证工程链路，不证明真实模型精度。
-
-Windows 若测试报告临时目录 `Permission denied`，可在当前 PowerShell 将测试临时目录改到工作区，再执行 CTest（仅影响当前终端，不修改系统权限）：
+Windows 如果报临时目录 `Permission denied`，在当前 PowerShell 设置测试临时目录后重跑：
 
 ```powershell
 New-Item -ItemType Directory -Force build/test-temp | Out-Null
@@ -111,9 +89,9 @@ $env:TMP = $env:TEMP
 ctest --test-dir build --output-on-failure
 ```
 
-如机器有多个 Python，可配置 `-DPython3_EXECUTABLE=YOUR_PYTHON_EXECUTABLE` 明确选择 Python 3.10 以上解释器。
+### 在板卡构建硬件版本
 
-板卡依赖安装好后，指定外部 SDK 的实际位置；以下占位参数必须替换：
+先安装外部 SDK，把下面的占位符替换为实际位置。模型放到 `model/model.rknn`，视频源、旋转、类别和区域在配置中设置。
 
 ```sh
 cmake -S . -B build-board -DMSAD_ENABLE_RKNN=ON -DBUILD_TESTING=ON \
@@ -125,30 +103,24 @@ ctest --test-dir build-board --output-on-failure
 ./build-board/multi_stream_alarm_demo config/rk3588_config.json
 ```
 
-启动前自行准备 `model/model.rknn`，按设备调整配置中的视频源、旋转、类别及区域。SDK 动态库必须能被系统加载器找到。需要与其他 NPU 程序共存时遵守会话锁；本仓库不能保证不同运行时并行安全。
+### 准备 YOLOv8n INT8 模型
 
-### 自行转换 YOLOv8n → INT8 RKNN
+1. 按 [Rockchip 适配导出说明](https://github.com/airockchip/ultralytics_yolov8/blob/main/RKOPT_README.zh-CN.md)获取权重并设置模型路径，在适配仓库执行 `PYTHONPATH=./ python ultralytics/engine/exporter.py` 导出分离检测头 ONNX。
+2. 安装与目标 Runtime 兼容的 [RKNN-Toolkit2](https://github.com/airockchip/rknn-toolkit2)，记录版本和提交号。
+3. 按 [Model Zoo YOLOv8 指引](https://github.com/airockchip/rknn_model_zoo/tree/main/examples/yolov8)准备实际场景的校准图片清单，修改 `examples/yolov8/python/convert.py` 的 `DATASET_PATH`，执行 `python convert.py YOUR_YOLOV8N.onnx rk3588 i8 YOUR_OUTPUT.rknn`。
+4. 使用 RGB、mean=0、std=255；板端输入原始 uint8。核对输入尺寸、三尺度检测头、COCO 80 类和 scale/zp。
+5. 将产物放入 `model/`，先跑硬件路径和等价性测试，再做带标注样本评测。
 
-本仓库不提供权重，也未在本次整理执行转换。请在独立工作目录按官方工具的版本要求准备环境：
-
-1. 获取合法使用的 YOLOv8n 权重；采用 [Rockchip 适配导出说明](https://github.com/airockchip/ultralytics_yolov8/blob/main/RKOPT_README.zh-CN.md)，配置 `ultralytics/cfg/default.yaml` 的模型路径，在该仓库运行 `PYTHONPATH=./ python ultralytics/engine/exporter.py` 导出 ONNX。普通融合输出的 ONNX 不保证兼容本工程。
-2. 安装与目标 Runtime 兼容的 [RKNN-Toolkit2](https://github.com/airockchip/rknn-toolkit2)，保留所用版本和提交号；历史 Runtime 为 2.3.0，不应盲用最新转换产物。
-3. 按 [Model Zoo YOLOv8 指引](https://github.com/airockchip/rknn_model_zoo/tree/main/examples/yolov8) 准备代表实际场景的校准图片清单。在其 `examples/yolov8/python/convert.py` 中将 `DATASET_PATH` 指向清单，然后执行 `python convert.py YOUR_YOLOV8N.onnx rk3588 i8 YOUR_OUTPUT.rknn`。
-4. 使用 RGB、mean=0、std=255 的转换配置；板端输入原始 uint8，不重复归一化。核对输入尺寸和输出头布局、类别数、scale/zp。当前后处理以 COCO 80 类、三尺度检测头为目标；定制模型需适配。
-5. 将产物放入忽略的 `model/` 目录，先跑硬件测试与等价性测试，再用带标注数据评价精度。没有标注不能声称完成 mAP 验证。
-
-交互划区：运行 `python tools/region_editor.py`，打开终端显示的本机地址。默认使用独立离线配置副本；可载入自己有权使用的图片辅助划区。保存后需让检测程序使用该配置重新启动，不支持运行中热更新。板卡取景必须显式加 `--allow-capture`；电脑浏览器不代表自动调用电脑摄像头。
-
-## 6. 已知边界
-
-- USB 摄像头实测约 10 FPS 属该设备/链路限制（S_PARM 调节无效），非该次测试的流水线瓶颈。
-- RTSP 仅用本机回环流验证，未接真实 IP 摄像机。
-- 四路并发数据来自文件源，非四路物理摄像头。
-- 未做模型量化转换（历史使用已导出的 INT8 模型）；上面的步骤为复现指引。
-- 未评估 mAP/精度（无标注数据），只做了动态一致性与等价性验证。
-- DMA-BUF 不是整条链路完全零拷贝；内存预算不是进程硬限制。ACK/持久化队列受磁盘容量和故障影响，不承诺无限缓存或绝对不丢失。
-- 最终统一控制台已在板卡隔离工程编译、运行完整 CTest 8/8 通过；本次公开版的外部SDK构建配置与无硬件回归另行验证。截图展示真实摄像头预览与划区，不等于新增检测精度、性能或长稳结论。
+交互操作用[统一实时控制台](docs/live-console.md)。离线划区工具为 `python tools/region_editor.py`；保存后的配置需重新启动检测程序加载。
 
 ## 许可
 
-作者自有代码采用 MIT，见 [LICENSE](LICENSE)。第三方 SDK、模型、转换工具遵循各自许可；MIT 不授予模型或厂商组件的使用、分发权。见 [依赖说明](docs/dependencies.md)。
+自有代码采用 [MIT](LICENSE)。SDK、模型和转换工具分别遵循原许可。
+
+## 6. 当前边界
+
+- 这只 USB 摄像头采集约 10 FPS，`S_PARM` 调节未生效；上表的高帧率来自文件源。四路数据来自文件，并非四个物理摄像头；RTSP 只验证了本机回环流。
+- 使用的是已导出的 INT8 模型，原部署记录为 `agricultureiot/rknn-yolo` 的 YOLOv11n，兼容当前 YOLOv8 风格后处理；上面的 YOLOv8n 转换步骤是复现指引。仓库不含权重、SDK 二进制或原始测试视频。
+- 尚无标注数据集评测，现场水瓶仍有漏检和类别波动；截图框约 31%、首次告警约 32.8% 都是单帧置信度，不是准确率。模拟模式验证业务流程，流程图说明模块关系。
+- DMA-BUF 覆盖部分硬件路径，内存预算不是进程硬上限；outbox 有容量限制，磁盘故障仍会影响投递。两个项目使用 NPU 时遵守会话锁，双 NPU 会话并行仍未解决。
+- 性能记录对应上述板卡、模型和素材，截图与路径一致性测试不替代精度或长稳测试。演示图选用普通物品，原始影像和日志保留在本地。
