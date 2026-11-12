@@ -23,6 +23,7 @@ private:
  std::condition_variable wake_;
  std::thread worker_;
  bool stop_=false;
+ std::uint64_t queuedGeneration_=0;
  std::string error_;
 };
 }

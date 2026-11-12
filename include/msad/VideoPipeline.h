@@ -25,7 +25,6 @@
 #include <memory>
 #include <mutex>
 #include <thread>
-#include <tuple>
 #include <vector>
 
 #include "msad/Config.h"
@@ -57,6 +56,7 @@ private:
     std::string instanceId_;
     /* ---- 四个线程入口（每路各一组） ---- */
     void requestStop();
+    void stopStream(int idx, const std::string& reason);
     void captureLoop(int idx);
     void preprocessLoop(int idx);
     void inferLoop(int idx);
@@ -79,6 +79,7 @@ private:
 
     /* 警戒区判断与告警触发（只投递任务，不做阻塞 IO） */
     void checkAndRaiseAlarm(int idx, DetectResult& res);
+    void assignTracks(int idx, DetectResult& res, uint64_t now);
 
     /* 简单计数信号量：限制推理并发路数 */
     class CountingSemaphore {
@@ -120,9 +121,15 @@ private:
     /* 每路警戒区域 */
     std::vector<std::vector<PolygonRegion>> regions_;
 
-    /* 告警冷却表：key=(streamId, regionId, classId) → 上次告警时间(ms) */
-    std::mutex cooldownMtx_;
-    std::map<std::tuple<int, int, int>, uint64_t> lastAlarmMs_;
+    // One alarm thread owns each stream's tracking and cooldown state.
+    struct Track {
+        Box box;
+        int classId;
+        uint64_t lastSeen;
+        std::map<int, uint64_t> lastAlarmByRegion;
+    };
+    std::vector<std::map<uint64_t, Track>> tracks_;
+    std::atomic<uint64_t> nextTrackId_{1};
 
     /* 推理并发限制器（默认 2 路并发，预留 4 路扩展） */
     std::unique_ptr<CountingSemaphore> inferGate_;
@@ -135,6 +142,8 @@ private:
     std::mutex stopMtx_;
     struct Stats { uint64_t captured=0, inferred=0, alarms=0, sent=0; };
     std::vector<Stats> stats_;
+    std::vector<bool> stoppedStreams_;
+    size_t activeStreams_ = 0;
     mutable std::mutex statsMtx_;   /* 保护 stats_（告警线程与 IO 线程并发更新） */
     std::chrono::steady_clock::time_point startedAt_;
 };

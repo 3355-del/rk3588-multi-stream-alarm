@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -37,6 +38,39 @@ class LiveConsoleTests(unittest.TestCase):
         self.assertIsNone(self.controller.receiver)
         self.assertFalse(self.controller.status()['running'])
         self.assertEqual(self.source.read_bytes(),self.original)
+
+    def test_stream_readiness_distinguishes_waiting_stale_and_current_frames(self):
+        config = copy.deepcopy(self.config)
+        config['streams'].append({**config['streams'][0], 'id': 8})
+        self.controller.config_path.write_text(json.dumps(config))
+        first = self.controller.frames / 's7.json'
+        second = self.controller.frames / 's8.json'
+        first.touch()
+        with patch.object(self.controller, 'process') as process:
+            process.poll.return_value = None
+            status = self.controller.status()
+            self.assertFalse(status['ready'])
+            self.assertEqual([s['state'] for s in status['stream_health']], ['ready', 'waiting'])
+            second.touch()
+            self.assertTrue(self.controller.status()['ready'])
+            os.utime(first, (0, 0))
+            status = self.controller.status()
+            self.assertFalse(status['ready'])
+            self.assertEqual([s['state'] for s in status['stream_health']], ['stale', 'ready'])
+
+    def test_database_unavailable_is_distinct_from_empty(self):
+        self.assertIn('尚未创建', self.controller.status()['alarm_error'])
+        self.controller.database.parent.mkdir(parents=True, exist_ok=True)
+        self.controller.database.write_bytes(b'invalid database')
+        outbox = self.root/'alarm_outbox_live'
+        (outbox/'quarantine').mkdir(parents=True)
+        (outbox/'pending.json').touch()
+        (outbox/'quarantine'/'invalid.json').touch()
+        status = self.controller.status()
+        self.assertEqual(status['alarms'], [])
+        self.assertIn('无法读取', status['alarm_error'])
+        self.assertEqual(status['alarm_storage']['pending'], 1)
+        self.assertEqual(status['alarm_storage']['quarantined'], 1)
 
     def test_rotation_preserves_physical_regions_and_original(self):
         config = copy.deepcopy(self.config); config.update(hardware=True,camera_flip_180=True)

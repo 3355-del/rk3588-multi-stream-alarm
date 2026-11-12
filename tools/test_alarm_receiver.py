@@ -1,6 +1,7 @@
 """Receive boundary regressions: idle connections versus incomplete packets."""
 import socket
 import unittest
+from unittest.mock import Mock
 from alarm_receiver import receive_exact
 
 
@@ -13,6 +14,14 @@ class ReceiveTests(unittest.TestCase):
 
     def test_idle_header_is_normal_disconnect(self):
         self.assertIsNone(receive_exact(self.reader,4,idle_ok=True))
+
+    def test_reset_between_messages_is_normal_but_reset_mid_packet_is_not(self):
+        client = Mock()
+        client.recv.side_effect = ConnectionResetError()
+        self.assertIsNone(receive_exact(client, 4, idle_ok=True))
+        client.recv.side_effect = [b'\x00', ConnectionResetError()]
+        with self.assertRaises(ConnectionResetError):
+            receive_exact(client, 4, idle_ok=True)
 
     def test_partial_header_timeout_still_fails(self):
         self.writer.sendall(b'\x00\x00')

@@ -37,6 +37,7 @@ struct Detection {
     Box box;
     int classId = -1;
     float confidence = 0.0f;
+    uint64_t trackId = 0;
 };
 
 /* 视频帧（YUV420P 平面格式，模拟解码输出；真实板卡为 MPP 解码帧） */
@@ -86,6 +87,7 @@ struct DetectResult {
     int      streamId = -1;
     Frame    frame;                    /* 帧快照（告警截图时使用） */
     std::vector<Detection> detections; /* 该帧的全部目标 */
+    int personCandidates = 0;          /* NMS 前的人体候选框数 */
 };
 
 /* 告警信息（TCP 上报告警 JSON 的数据源） */
@@ -99,6 +101,7 @@ struct AlarmInfo {
     float    centerX = 0.0f;   /* 目标中心 x */
     float    centerY = 0.0f;   /* 目标中心 y */
     std::string screenshotFile;/* 告警截图文件名（相对截图目录） */
+    uint64_t trackId = 0;      /* 本次运行内的目标编号，0 表示历史事件或无编号 */
 };
 
 /* 目标类别名（COCO 前 5 类演示；真实工程加载完整 80 类 names 文件） */

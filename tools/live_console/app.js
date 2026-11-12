@@ -89,14 +89,16 @@ function draw() {
  for (const d of packet?.detections || []) {
   const matched=matches(d).length>0; if (matched) hit++;
   ctx.strokeStyle=matched?'#ffd05c':'#76e4d3';ctx.lineWidth=w/240;ctx.strokeRect(d.x,d.y,d.w,d.h);
-  const label=`${d.name} ${(d.confidence*100).toFixed(0)}%`;
+  const label=`${d.name}${d.track_id ? ' #'+d.track_id : ''} ${(d.confidence*100).toFixed(0)}%`;
   ctx.font=`${Math.max(14,w/37)}px sans-serif`;
   const y=Math.max(24,d.y),bw=ctx.measureText(label).width+12;
   ctx.fillStyle='#101a22';ctx.fillRect(d.x,y-24,bw,25);ctx.fillStyle=matched?'#ffd05c':'#76e4d3';ctx.fillText(label,d.x+6,y-5);
  }
  if (packet) {
   const count=packet.detections.length;
-  $('match').textContent = state?.mode==='preview' ? '取景模式 · 不执行推理，也不会产生告警。' : `${count} 个检测目标，${hit} 个中心点在当前显示区域内。${dirty?'区域修改未应用，实际告警仍按旧规则判断。':'是否新增告警以数据库记录为准。'}`;
+  const people=packet.detections.filter(d=>d.class_id===0).length;
+  const candidates=Number.isInteger(packet.person_candidates) ? `（合并重叠框前 ${packet.person_candidates} 个候选框）` : '';
+  $('match').textContent = state?.mode==='preview' ? '取景模式 · 不执行推理，也不会产生告警。' : `当前帧检出 ${people} 人${candidates} · ${count} 个检测目标 · ${hit} 个中心点在当前显示区域内。${dirty?'区域修改未应用，实际告警仍按旧规则判断。':''}`;
  }
 }
 function freeze(value) {
@@ -147,15 +149,57 @@ $('save').onclick=()=>action(async()=>{
  adopt(data,true);invalidate();freeze(false);message(data.restart_error?'已保存但启动失败：'+data.restart_error:data.message,!!data.restart_error);
 });
 $('reload').onclick=()=>action(async()=>{if(dirty&&!confirm('放弃未应用修改？'))return;adopt(await request('/api/config'),true);invalidate();freeze(false);message('已重新加载保存的配置。');});
-function events(alarms){const list=$('alarms');list.replaceChildren();if(!alarms.length){const li=document.createElement('li');li.textContent='暂无已入库告警';list.append(li);return;}alarms.forEach(a=>{const li=document.createElement('li');li.textContent=`通道 ${a.stream_id ?? a.stream ?? '—'} · 区域 ${a.region_id ?? a.region ?? '—'} · 类别 ${a.class_id ?? a.class ?? '—'} · 置信度 ${typeof a.confidence==='number'?(a.confidence*100).toFixed(1)+'%':'—'}`;const note=document.createElement('span');note.textContent=`事件 ${a.event_id || '—'} · 入库 ${a.received_at} UTC`;li.append(note);if(a.screenshot&&a.event_id){const link=document.createElement('a');link.textContent='查看告警截图';link.href='/api/shot?event='+encodeURIComponent(a.event_id);link.target='_blank';link.rel='noopener';li.append(link);}list.append(li);});}
+function events(alarms, error, storage) {
+ const list=$('alarms');
+ list.replaceChildren();
+ if (storage) {
+  const li=document.createElement('li');
+  const freeMiB=Math.floor(storage.project_free_bytes / (1024*1024));
+  li.textContent='待投递 '+storage.pending+' 条 · 隔离 '+storage.quarantined+' 条 · 项目磁盘剩余 '+freeMiB+' MiB';
+  list.append(li);
+ }
+ if (!alarms.length) {
+  const li=document.createElement('li');
+  li.textContent=error||'暂无已入库告警';
+  list.append(li);
+  return;
+ }
+ for (const alarm of alarms) {
+  const li=document.createElement('li');
+  const target=alarm.track_id ? ' · 目标 #'+alarm.track_id : '';
+  const confidence=typeof alarm.confidence==='number' ? (alarm.confidence*100).toFixed(1)+'%' : '—';
+  li.textContent='通道 '+(alarm.stream_id ?? alarm.stream ?? '—')+
+    ' · 区域 '+(alarm.region_id ?? alarm.region ?? '—')+
+    ' · 类别 '+(alarm.class_id ?? alarm.class ?? '—')+target+' · 置信度 '+confidence;
+  const note=document.createElement('span');
+  note.textContent='事件 '+(alarm.event_id || '—')+' · 入库 '+alarm.received_at+' UTC';
+  li.append(note);
+  if (alarm.screenshot && alarm.event_id) {
+   const link=document.createElement('a');
+   link.textContent='查看告警截图';
+   link.href='/api/shot?event='+encodeURIComponent(alarm.event_id);
+   link.target='_blank';
+   link.rel='noopener';
+   li.append(link);
+  }
+  list.append(li);
+ }
+}
 async function pollStatus(){
  try{
   const next=await request('/api/status');state=next;
   if(run!==next.run){run=next.run;invalidate();}
   const labels={stopped:'已停止',preview:'预览中 · 无推理',detect:'检测与告警运行中',failed:'运行失败'};
-  $('state').textContent=next.running&&!next.ready?'正在启动 · 等待首帧':labels[next.mode]||next.mode;$('state').classList.toggle('error',next.mode==='failed');
+  const ready=next.stream_health.filter(stream=>stream.state==='ready').length;
+  const selected=next.stream_health.find(stream=>stream.id===config?.streams[streamIndex]?.id);
+  const streamLabel=selected?.state==='stale'?'当前通道画面中断':selected?.state==='waiting'?'当前通道等待首帧':'';
+  const label=labels[next.mode]||next.mode;
+  $('state').textContent=next.running&&!next.ready
+    ? [label, ready+'/'+next.stream_health.length+' 路有画面',streamLabel].filter(Boolean).join(' · ')
+    : label;
+  $('state').classList.toggle('error',next.mode==='failed'||(next.running&&selected?.state==='stale'));
   $('summary').textContent=next.hardware?'板卡画面、真实检测与警戒区在同一页面。':'当前是模拟验证，不代表真实摄像头或 NPU 效果。';
-  $('logs').textContent=next.logs.join('\n')||'尚无进程日志';events(next.alarms);
+  $('logs').textContent=next.logs.join('\n')||'尚无进程日志';events(next.alarms,next.alarm_error,next.alarm_storage);
   if(next.error)message(next.error,true);
   if(!dirty)$('dirty').textContent=next.applied?'规则已应用':'规则已保存 · 启动后应用';
  }catch(e){$('state').textContent='控制台连接中断';$('state').classList.add('error');message('控制台未响应。检查 USB 与板卡窗口 A；画面可能已经过时。',true);state=null;}

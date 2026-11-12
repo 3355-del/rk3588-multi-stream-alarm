@@ -187,6 +187,7 @@ void TcpAlarmNotifier::close() {
 std::string TcpAlarmNotifier::alarmToJson(const AlarmInfo& a) {
     Json root(Json::Type::Object);
     if (!a.eventId.empty()) root["event_id"] = a.eventId;
+    if (a.trackId) root["track_id"] = static_cast<double>(a.trackId);
     root["type"] = "alarm"; root["timestamp_ms"] = static_cast<double>(a.timestampMs);
     root["stream_id"] = a.streamId; root["region_id"] = a.regionId;
     root["class_id"] = a.classId; root["class_name"] = std::string(cocoClassName(a.classId));

@@ -19,6 +19,7 @@ def run(driver):
             first=subprocess.run([str(driver),str(p/'outbox'),str(port),'2','100'],capture_output=True,timeout=5)
             assert first.returncode==0,first.stderr
             assert len(list((p/'outbox').glob('*.json')))==2
+            (p/'outbox'/'000.json').write_bytes(b'{broken json')
             listener.listen();listener.settimeout(8)
             errors=[];seen=[]
             def serve():
@@ -41,6 +42,7 @@ def run(driver):
             try:
                 # No new alarms; startup alone must drain old records.
                 waitfor(lambda:len(list((p/'outbox').glob('*.json')))==0)
+                assert (p/'outbox'/'quarantine'/'000.json').read_bytes()==b'{broken json'
                 assert seen[0]==seen[1] and len(set(seen))==2,seen
                 with closing(sqlite3.connect(db)) as con:assert con.execute('SELECT COUNT(*) FROM alarms').fetchone()[0]==2
                 duplicate=subprocess.run([str(driver),str(p/'outbox'),str(port),'0','1'],capture_output=True,timeout=3)

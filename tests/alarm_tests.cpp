@@ -1,4 +1,6 @@
 #include "msad/VideoPipeline.h"
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <iostream>
 #include <set>
@@ -17,7 +19,11 @@ struct VideoPipelineTestAccess {
         p.stats_.resize(1);
         p.alarmTasks_=std::make_unique<RingBuffer<VideoPipeline::AlarmTask>>(p.cfg_.alarmQueueCapacity);
     }
-    static void dispatch(VideoPipeline& p, DetectResult& result) { p.checkAndRaiseAlarm(0,result); }
+    static void dispatch(VideoPipeline& p, DetectResult& result, uint64_t tick=0) {
+        p.assignTracks(0,result,tick);
+        p.checkAndRaiseAlarm(0,result);
+    }
+    static void failStream(VideoPipeline& p, int idx) { p.stopStream(idx, "test source failure"); }
     static size_t queued(VideoPipeline& p) { return p.alarmTasks_->size(); }
     static size_t rejected(VideoPipeline& p) { return p.alarmTasks_->rejectedCount(); }
     static auto pop(VideoPipeline& p) {
@@ -48,6 +54,66 @@ DetectResult frame(std::vector<int> classes) {
 }
 int main() {
     try {
+        {
+            auto cfg = configuration(0, 8);
+            auto second = cfg.streams.front();
+            second.id = 11;
+            cfg.streams.push_back(second);
+            std::array<std::atomic<int>, 2> observed{};
+            VideoPipeline p(cfg, {}, [&](const DetectResult& r) {
+                ++observed.at(r.streamId - 10);
+            }, true);
+            require(p.start(), "two mock streams did not start");
+            const auto waitForFrames = [&](int first, int secondCount) {
+                auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                while ((observed[0] < first || observed[1] < secondCount) &&
+                       std::chrono::steady_clock::now() < deadline)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                return observed[0] >= first && observed[1] >= secondCount;
+            };
+            require(waitForFrames(1, 1), "mock streams did not produce frames");
+            VideoPipelineTestAccess::failStream(p, 0);
+            VideoPipelineTestAccess::failStream(p, 0);
+            require(p.isRunning() && !p.failed(), "single stream fault stopped the pipeline");
+            require(waitForFrames(1, observed[1] + 3), "healthy stream stopped producing frames");
+            VideoPipelineTestAccess::failStream(p, 1);
+            require(!p.isRunning() && p.failed(), "all streams stopped without reporting failure");
+            p.stop();
+        }
+        {
+            VideoPipeline p(configuration(5000,8));VideoPipelineTestAccess::prepare(p);
+            auto first=frame({0,0});
+            first.detections[1].box.x=70;
+            VideoPipelineTestAccess::dispatch(p,first);
+            require(VideoPipelineTestAccess::queued(p)==2,"two people in one region must generate two alarms");
+            const auto left=VideoPipelineTestAccess::pop(p).info.trackId;
+            const auto right=VideoPipelineTestAccess::pop(p).info.trackId;
+            require(left!=0 && right!=0 && left!=right,"same-class targets shared a track");
+            auto repeated=frame({0,0});
+            repeated.detections[0].box.x=71;
+            repeated.detections[1].box.x=11;
+            VideoPipelineTestAccess::dispatch(p,repeated,100);
+            require(repeated.detections[0].trackId==right && repeated.detections[1].trackId==left,
+                    "track changed when detection order changed");
+            require(VideoPipelineTestAccess::queued(p)==0,"repeated people entered cooldown independently");
+            auto newcomer=frame({0,0,0});
+            newcomer.detections[1].box.x=70;
+            newcomer.detections[2].box.x=40;
+            VideoPipelineTestAccess::dispatch(p,newcomer,200);
+            require(VideoPipelineTestAccess::queued(p)==1,"new person blocked by existing people's cooldown");
+            const auto third=VideoPipelineTestAccess::pop(p).info.trackId;
+            require(third!=left && third!=right,"new person reused an active track");
+            auto missing=frame({});
+            VideoPipelineTestAccess::dispatch(p,missing,300);
+            auto returned=frame({0});
+            VideoPipelineTestAccess::dispatch(p,returned,600);
+            require(returned.detections[0].trackId==left && VideoPipelineTestAccess::queued(p)==0,
+                    "brief missing detection lost its track or cooldown");
+            auto expired=frame({0});
+            VideoPipelineTestAccess::dispatch(p,expired,1701);
+            require(expired.detections[0].trackId!=left && VideoPipelineTestAccess::queued(p)==1,
+                    "expired track blocked a new event");
+        }
         {
             auto cfg=configuration(60000,1);
             VideoPipeline p(cfg);VideoPipelineTestAccess::prepare(p);

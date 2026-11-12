@@ -8,6 +8,13 @@ module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
 def box(category=0,score=1):return {'class_id':category,'xywh':[0,0,10,10],'score':score}
 
 class Scores(unittest.TestCase):
+    def test_two_boxes_at_one_person_do_not_hide_missed_second_person(self):
+        second = {**box(), 'xywh':[30,0,10,10]}
+        result = module.score({0:[box(), second]}, {0:[box(), box(score=.8)]})['multi_person']
+        self.assertEqual(result['frames_with_exact_count'], 1)
+        self.assertEqual(result['frames_with_missed_person'], 1)
+        self.assertEqual(result['miss_examples'], [{'frame':0,'labeled':2,'predicted':2,'matched':1}])
+
     def test_duplicates_do_not_count_as_two_true_positives(self):
         r=module.score({0:[box()]},{0:[box(),box(score=.8)]})['total']
         self.assertEqual((r['tp'],r['fp'],r['fn']),(1,1,0));self.assertEqual(r['precision'],.5)

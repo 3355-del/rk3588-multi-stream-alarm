@@ -92,31 +92,54 @@ bool DurableAlarmNotifier::sendAlarm(const AlarmInfo& input) {
     std::ofstream out(temporary,std::ios::binary|std::ios::trunc); out<<payload;out.close();
     if(!out) throw std::runtime_error("cannot write durable alarm");
     syncFile(temporary);std::filesystem::rename(temporary,target);syncDirectory(directory_);
+    ++queuedGeneration_;
     wake_.notify_one();return true;
 }
 void DurableAlarmNotifier::run() {
     try {
         while(true) {
             std::vector<std::filesystem::path> paths;
+            std::uint64_t generation;
             {
                 std::unique_lock<std::mutex> guard(mutex_);
                 if(stop_) break;
+                generation=queuedGeneration_;
                 for(const auto& f:std::filesystem::directory_iterator(directory_)) if(f.path().extension()==".json") paths.push_back(f.path());
             }
             std::sort(paths.begin(),paths.end());
             for(const auto& p:paths) {
                 { std::lock_guard<std::mutex> guard(mutex_); if(stop_) return; }
-                if(std::filesystem::file_size(p)>1024*1024) throw std::runtime_error("oversized outbox record");
-                std::ifstream in(p,std::ios::binary);std::string payload((std::istreambuf_iterator<char>(in)),{});
-                in.close();
-                Json record;std::string error;
-                if(!Json::parse(payload,record,error) || record["event_id"].asString()!=p.stem().string()) throw std::runtime_error("invalid outbox record; preserved for inspection");
+                std::string payload;
+                bool invalid=std::filesystem::file_size(p)>1024*1024;
+                if(!invalid) {
+                    std::ifstream in(p,std::ios::binary);
+                    if(!in) throw std::runtime_error("cannot read outbox record");
+                    payload.assign(std::istreambuf_iterator<char>(in), {});
+                    if(in.bad()) throw std::runtime_error("outbox record read failed");
+                    Json record;std::string error;
+                    invalid=!Json::parse(payload,record,error) ||
+                        record["type"].asString()!="alarm" ||
+                        record["event_id"].asString()!=p.stem().string();
+                }
+                if(invalid) {
+                    const auto quarantine=directory_/"quarantine";
+                    std::lock_guard<std::mutex> guard(mutex_);
+                    std::filesystem::create_directories(quarantine);
+                    auto saved=quarantine/p.filename();
+                    if(std::filesystem::exists(saved))
+                        saved=quarantine/(uniqueEventId()+"-"+p.filename().string());
+                    std::filesystem::rename(p,saved);
+                    syncDirectory(quarantine);
+                    syncDirectory(directory_);
+                    Logger::warn("DurableAlarm","quarantined invalid record: "+saved.filename().string());
+                    continue;
+                }
                 if(!tcp_.sendPayload(payload,p.stem().string())) break;
                 { std::lock_guard<std::mutex> guard(mutex_); std::filesystem::remove(p);syncDirectory(directory_); }
                 Logger::info("DurableAlarm","acked="+p.stem().string());
             }
             std::unique_lock<std::mutex> guard(mutex_);
-            wake_.wait_for(guard,std::chrono::seconds(1),[this]{return stop_;});
+            wake_.wait_for(guard,std::chrono::seconds(1),[this,generation]{return stop_ || queuedGeneration_!=generation;});
         }
     } catch(const std::exception& e) {
         std::lock_guard<std::mutex> guard(mutex_);error_=e.what();Logger::error("DurableAlarm",error_);

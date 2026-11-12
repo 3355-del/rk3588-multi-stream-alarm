@@ -8,7 +8,7 @@ def receive_exact(client,size,*,idle_ok=False):
     while len(data)<size:
         try:
             chunk=client.recv(size-len(data))
-        except TimeoutError:
+        except (TimeoutError, ConnectionResetError):
             if idle_ok and not data:return None
             raise
         if not chunk:

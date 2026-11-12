@@ -1,7 +1,7 @@
 /*
  * motion_eval.cpp — 动态场景检测测评（离线工具，不参与主程序运行）
  *
- * 用法: motion_eval <model.rknn> <video> [outdir] [maxFrames]
+ * 用法: motion_eval <model.rknn> <video> [outdir] [maxFrames] [confidence] [nmsIoU]
  *
  * 做什么：用真实链路（MPP 硬解 → RGA 预处理 → RKNN 推理 + 手写 NMS）逐帧跑一段
  *         动态视频，输出可复核的量化指标与可视化证据。
@@ -77,19 +77,33 @@ struct FrameRec {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 3) {
-        std::fprintf(stderr, "usage: %s MODEL VIDEO [OUTDIR] [maxFrames]\n", argv[0]);
+    if (argc < 3 || argc > 7) {
+        std::fprintf(stderr, "usage: %s MODEL VIDEO [OUTDIR] [maxFrames] [confidence] [nmsIoU]\n", argv[0]);
         return 2;
     }
     const std::string modelPath = argv[1];
     const std::string video     = argv[2];
-    const std::string outdir    = (argc > 3) ? argv[3] : std::string("outputs/motion_eval");
+    const std::string outdir    = (argc > 3) ? argv[3] : std::string("/root/audit/motion_eval_out");
     int maxFrames=900;
+    float confThresh=kConfThresh, nmsThresh=kNmsThresh;
     try {
         if(argc>4){size_t used=0;maxFrames=std::stoi(argv[4],&used);if(used!=std::strlen(argv[4]))throw std::invalid_argument("frame count");}
         if(maxFrames<1||maxFrames>10000)throw std::invalid_argument("frame count");
     } catch(const std::exception&) {
         std::fprintf(stderr,"maxFrames must be an integer in 1..10000\n");return 2;
+    }
+    try {
+        auto parseThreshold = [](const char* value) {
+            size_t used = 0;
+            const float threshold = std::stof(value, &used);
+            if (used != std::strlen(value) || !std::isfinite(threshold) || threshold <= 0 || threshold > 1)
+                throw std::invalid_argument("threshold");
+            return threshold;
+        };
+        if (argc > 5) confThresh = parseThreshold(argv[5]);
+        if (argc > 6) nmsThresh = parseThreshold(argv[6]);
+    } catch (const std::exception&) {
+        std::fprintf(stderr, "confidence and nmsIoU must be in (0, 1]\n");return 2;
     }
 
     if(!std::filesystem::create_directory(outdir)) {
@@ -106,7 +120,7 @@ int main(int argc, char** argv) {
     if (!source.open(video)) { std::fprintf(stderr, "cannot open video: %s\n", video.c_str()); return 1; }
     RgaFrameProcessor pre(640, 640, false, true);
     if (!pre.init()) return 1;
-    RknnInferenceEngine engine(modelPath, kConfThresh);
+    RknnInferenceEngine engine(modelPath, confThresh);
     if (!engine.init()) return 1;
 
     std::vector<FrameRec> recs;
@@ -155,12 +169,14 @@ int main(int argc, char** argv) {
         std::vector<Detection> dets;
         const auto inferStarted=std::chrono::steady_clock::now();
         if (!engine.infer(proc, dets)) { Logger::warn("motion_eval", "infer failed at " + std::to_string(f)); continue; }
-        dets = nms(dets, kNmsThresh);
+        const auto personCandidates = std::count_if(dets.begin(), dets.end(),
+            [](const Detection& d) { return d.classId == kPersonClass; });
+        dets = nms(dets, nmsThresh);
         const auto finished=std::chrono::steady_clock::now();
         auto ms=[](auto a,auto b){return std::chrono::duration<double,std::milli>(b-a).count();};
         timings<<f<<','<<ms(started,captured)<<','<<ms(captured,preprocessed)<<','<<ms(inferStarted,finished)<<','<<ms(started,finished)<<'\n';
         std::ostringstream row;
-        row<<"{\"frame\":"<<f<<",\"boxes\":[";
+        row<<"{\"frame\":"<<f<<",\"person_candidates\":"<<personCandidates<<",\"boxes\":[";
         bool first=true;
         for(const auto& d:dets){
             if(!first)row<<',';
@@ -171,7 +187,7 @@ int main(int argc, char** argv) {
         row<<"]}\n";
         predictions<<row.str();
         // Unannotated images allow independent review without showing detections.
-        if(f<120 && f%20==0){
+        if (f % std::max(1, maxFrames / 30) == 0) {
             char imagePath[512];std::snprintf(imagePath,sizeof(imagePath),"%s/label_frame_%04d.png",outdir.c_str(),f);
             Frame shot=proc;shot.data=pixels;
             if(!PngWriter::saveFrameAsPng(shot,imagePath,{}))return 1;
@@ -253,7 +269,7 @@ int main(int argc, char** argv) {
         std::fprintf(fp, "  \"completed\": %s,\n",completed?"true":"false");
         std::fprintf(fp, "  \"video\": \"%s\",\n", video.c_str());
         std::fprintf(fp, "  \"model\": \"%s\",\n", modelPath.c_str());
-        std::fprintf(fp, "  \"conf_thresh\": %.2f,\n  \"nms_thresh\": %.2f,\n", kConfThresh, kNmsThresh);
+        std::fprintf(fp, "  \"conf_thresh\": %.6g,\n  \"nms_thresh\": %.6g,\n", confThresh, nmsThresh);
         std::fprintf(fp, "  \"frames_processed\": %zu,\n", recs.size());
         std::fprintf(fp, "  \"frames_unique\": %d,\n", uniqueCount);
         std::fprintf(fp, "  \"person_frames_unique\": %d,\n", detectedUnique);

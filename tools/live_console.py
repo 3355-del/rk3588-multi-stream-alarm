@@ -219,20 +219,52 @@ class Controller:
             self._poll()
             config, rev = self.read_config()
             running = bool(self.process and self.process.poll() is None)
+            now = time.time()
+            streams = []
+            for stream in config['streams']:
+                stream_id = stream['id']
+                age_ms = None
+                if running:
+                    try:
+                        modified = (self.frames / f's{stream_id}.json').stat().st_mtime
+                        age_ms = max(0, int((now - modified) * 1000))
+                    except FileNotFoundError:
+                        pass
+                state = ('stopped' if not running else 'waiting' if age_ms is None
+                         else 'stale' if age_ms > 3000 else 'ready')
+                streams.append({'id': stream_id, 'state': state, 'age_ms': age_ms})
             with self.log_lock: logs = list(self.logs)[-25:]
+            alarms, alarm_error = self.alarm_status()
             return {'mode':self.mode, 'running':running, 'error':self.error,
-                    'ready':running and any(self.frames.glob('s*.json')),
+                    'ready':running and bool(streams) and all(s['state']=='ready' for s in streams),
+                    'stream_health':streams,
                     'applied':running and rev == self.active_revision,
                     'hardware':bool(config.get('hardware')), 'run':f'{self.session}-{self.run_id}',
-                    'logs':logs, 'alarms':self.alarms()}
+                    'logs':logs, 'alarms':alarms, 'alarm_error':alarm_error,
+                    'alarm_storage':self.alarm_storage()}
 
     def alarms(self):
-        if not self.database.exists(): return []
+        return self.alarm_status()[0]
+
+    def alarm_status(self):
+        if not self.database.exists():
+            return [], '告警库尚未创建，启动检测后再查看。'
         try:
             with closing(sqlite3.connect(self.database.as_uri()+'?mode=ro',uri=True,timeout=.2)) as db:
                 rows = db.execute('SELECT payload,received_at FROM alarms ORDER BY id DESC LIMIT 6').fetchall()
-            return [{**json.loads(payload),'received_at':received} for payload,received in rows]
-        except (sqlite3.Error, ValueError): return []
+            return [{**json.loads(payload),'received_at':received} for payload,received in rows], ''
+        except (sqlite3.Error, ValueError, TypeError):
+            return [], '告警库暂时无法读取，请查看板卡日志。'
+
+    def alarm_storage(self):
+        outbox = self.root/'alarm_outbox_live'
+        try:
+            pending = sum(1 for _ in outbox.glob('*.json'))
+            quarantined = sum(1 for _ in (outbox/'quarantine').glob('*.json'))
+            free = shutil.disk_usage(self.root).free
+            return {'pending':pending, 'quarantined':quarantined, 'project_free_bytes':free}
+        except OSError:
+            return None
 
     def shot(self, event_id):
         if not isinstance(event_id,str) or not 1 <= len(event_id) <= 128:
@@ -339,7 +371,7 @@ def main():
     parser.add_argument('--project-root',type=Path,default=ROOT)
     parser.add_argument('--config',type=Path,required=True)
     parser.add_argument('--binary',type=Path,required=True)
-    parser.add_argument('--host',choices=['127.0.0.1','0.0.0.0'],default='127.0.0.1')
+    parser.add_argument('--host',choices=['127.0.0.1'],default='127.0.0.1')
     parser.add_argument('--port',type=int,default=8081)
     args = parser.parse_args()
     controller = Controller(args.project_root,args.config,args.binary)
@@ -347,7 +379,7 @@ def main():
         with ThreadingHTTPServer((args.host,args.port),Handler) as server:
             server.controller = controller
             print(f'统一控制台已启动，当前空闲，摄像头未开启。板卡端口 {args.port}。',flush=True)
-            print(f'USB：电脑转发 18081→{args.port} 后，浏览器打开 http://127.0.0.1:18081/ 。',flush=True)
+            print(f'网线用 SSH 转发，USB 用 ADB 转发。电脑端口 18081 转到板卡 {args.port} 后打开 http://127.0.0.1:18081/ 。',flush=True)
             try: server.serve_forever(poll_interval=.2)
             except KeyboardInterrupt: pass
     finally: controller.close()

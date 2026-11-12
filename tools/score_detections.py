@@ -42,24 +42,41 @@ def iou(a,b):
 def score(labels,predictions,confidence=.25,threshold=.5):
     if labels.keys()!=predictions.keys():raise ValueError('Frame sets differ; explicitly supply empty prediction rows')
     counts={}
+    multi_person={'frames':0,'frames_with_missed_person':0,'frames_with_exact_count':0,
+                  'people':0,'matched_people':0,'miss_examples':[]}
     for frame,gold in labels.items():
         used=set()
+        predicted_people=0
         for box in gold:counts.setdefault(box['class_id'],{'tp':0,'fp':0,'fn':0})
         for pred in sorted(predictions[frame],key=lambda b:b['score'],reverse=True):
             if pred['score']<confidence:continue
             category=pred['class_id'];c=counts.setdefault(category,{'tp':0,'fp':0,'fn':0})
+            if category==0:predicted_people+=1
             candidates=[(iou(pred['xywh'],b['xywh']),i) for i,b in enumerate(gold) if i not in used and b['class_id']==category]
             best,index=max(candidates,default=(0,-1))
             if index>=0 and best>=threshold:c['tp']+=1;used.add(index)
             else:c['fp']+=1
         for i,box in enumerate(gold):
             if i not in used:counts[box['class_id']]['fn']+=1
+        people=[i for i,box in enumerate(gold) if box['class_id']==0]
+        if len(people)>=2:
+            matched=sum(i in used for i in people)
+            multi_person['frames']+=1
+            multi_person['people']+=len(people)
+            multi_person['matched_people']+=matched
+            if predicted_people==len(people):multi_person['frames_with_exact_count']+=1
+            if matched<len(people):
+                multi_person['frames_with_missed_person']+=1
+                if len(multi_person['miss_examples'])<50:
+                    multi_person['miss_examples'].append({'frame':frame,'labeled':len(people),
+                                                          'predicted':predicted_people,'matched':matched})
     def metrics(c):
         return dict(c,precision=c['tp']/(c['tp']+c['fp']) if c['tp']+c['fp'] else None,
                     recall=c['tp']/(c['tp']+c['fn']) if c['tp']+c['fn'] else None)
     total={k:sum(v[k] for v in counts.values()) for k in ('tp','fp','fn')}
     return {'frames':len(labels),'confidence':confidence,'iou_threshold':threshold,'total':metrics(total),
-            'classes':{str(k):metrics(v) for k,v in counts.items()},'note':'Fixed-threshold precision/recall, not mAP.'}
+            'classes':{str(k):metrics(v) for k,v in counts.items()},'multi_person':multi_person,
+            'note':'Fixed-threshold precision/recall, not mAP.'}
 
 
 def main():

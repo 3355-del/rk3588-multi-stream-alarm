@@ -61,11 +61,13 @@ void PreviewPublisher::run() {
             data["timestamp_ms"] = static_cast<double>(result.timestampMs);
             data["width"] = result.frame.width; data["height"] = result.frame.height;
             data["image"] = image.filename().u8string();
+            data["person_candidates"] = result.personCandidates;
             data["detections"] = Json(Json::Type::Array);
             for (const auto& detection : result.detections) {
                 Json box(Json::Type::Object);
                 box["class_id"] = detection.classId; box["name"] = cocoClassName(detection.classId);
                 box["confidence"] = static_cast<double>(detection.confidence);
+                if (detection.trackId) box["track_id"] = static_cast<double>(detection.trackId);
                 box["x"] = static_cast<double>(detection.box.x); box["y"] = static_cast<double>(detection.box.y);
                 box["w"] = static_cast<double>(detection.box.w); box["h"] = static_cast<double>(detection.box.h);
                 data["detections"].array().push_back(box);

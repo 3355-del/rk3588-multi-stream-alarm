@@ -2,6 +2,8 @@
  * VideoPipeline.cpp — 四线程流水线实现
  */
 #include "msad/VideoPipeline.h"
+#include <algorithm>
+#include <set>
 #include "msad/ReconnectingSource.h"
 
 #include <chrono>
@@ -36,7 +38,7 @@ namespace msad {
 
 VideoPipeline::VideoPipeline(const AppConfig& cfg, ScreenshotWriter writer, ResultObserver observer, bool previewOnly)
     : cfg_(cfg), screenshotWriter_(writer ? std::move(writer) : ScreenshotWriter(PngWriter::saveFrameAsPng)),
-      observer_(std::move(observer)), previewOnly_(previewOnly) {}
+      observer_(std::move(observer)), previewOnly_(previewOnly), tracks_(cfg.streams.size()) {}
 
 VideoPipeline::~VideoPipeline() {
     stop();
@@ -80,7 +82,7 @@ bool VideoPipeline::start() {
     if (!cfg_.validate(error)) { Logger::error("Pipeline", error); return false; }
     failed_.store(false);
     regions_.clear();
-    lastAlarmMs_.clear();
+    for (auto& tracks : tracks_) tracks.clear();
     stats_.assign(cfg_.streams.size(), Stats{});
     try {
     if (cfg_.streams.empty()) {
@@ -130,8 +132,16 @@ bool VideoPipeline::start() {
     qCap2Pre_.resize(n);
     qPre2Inf_.resize(n);
     qInf2Alarm_.resize(n);
+    stoppedStreams_.assign(n, false);
+    activeStreams_ = n;
+#if defined(MSAD_ENABLE_RKNN)
+    std::shared_ptr<RknnModelContext> sharedModel;
+#endif
 
     for (size_t i = 0; i < n; ++i) {
+        qCap2Pre_[i] = std::make_unique<RingBuffer<Frame>>(cfg_.queueCapacity);
+        qPre2Inf_[i] = std::make_unique<RingBuffer<Frame>>(cfg_.queueCapacity);
+        qInf2Alarm_[i] = std::make_unique<RingBuffer<DetectResult>>(cfg_.queueCapacity);
 #if defined(MSAD_ENABLE_RKNN)
         if (cfg_.hardware) {
             /*
@@ -146,7 +156,6 @@ bool VideoPipeline::start() {
                 sources_[i]=std::make_unique<ReconnectingSource>(std::move(sources_[i]));
             processors_[i] = std::make_unique<RgaFrameProcessor>(cfg_.frameWidth, cfg_.frameHeight, cfg_.cameraFlip180,cfg_.dmaInput);
             if (!previewOnly_) {
-                auto sharedModel=i?static_cast<RknnInferenceEngine*>(engines_[0].get())->sharedModel():std::shared_ptr<RknnModelContext>{};
                 engines_[i] = std::make_unique<RknnInferenceEngine>(cfg_.modelPath, static_cast<float>(cfg_.confThresh),sharedModel,cfg_.nativeOutputs);
             }
         } else {
@@ -163,14 +172,22 @@ bool VideoPipeline::start() {
             engines_[i]    = std::make_unique<MockInferenceEngine>(scene);
         }
 
-        if (!sources_[i]->open(cfg_.streams[i].sourceUri)) {
-            Logger::error("Pipeline", "stream " + std::to_string(i) + " open failed");
-            stop(); return false;
+        const bool opened = sources_[i]->open(cfg_.streams[i].sourceUri);
+        if (!opened || !processors_[i]->init() || (!previewOnly_ && !engines_[i]->init())) {
+            Logger::error("Pipeline", "stream=" + std::to_string(cfg_.streams[i].id) +
+                         (opened ? " init failed" : " open failed"));
+            stoppedStreams_[i] = true;
+            --activeStreams_;
+            sources_[i]->close();
+            sources_[i].reset();
+            processors_[i].reset();
+            engines_[i].reset();
+            continue;
         }
-        if (!processors_[i]->init() || (!previewOnly_ && !engines_[i]->init())) {
-            Logger::error("Pipeline", "stream " + std::to_string(i) + " init failed");
-            stop(); return false;
-        }
+#if defined(MSAD_ENABLE_RKNN)
+        if (cfg_.hardware && !previewOnly_ && !sharedModel)
+            sharedModel = static_cast<RknnInferenceEngine*>(engines_[i].get())->sharedModel();
+#endif
 
         /* 该路警戒区域（配置 → 算法对象） */
         for (const auto& rc : cfg_.streams[i].regions) {
@@ -180,15 +197,17 @@ bool VideoPipeline::start() {
             regions_[i].push_back(std::move(region));
         }
 
-        /* 三级队列，容量=queue_capacity（满丢最旧） */
-        qCap2Pre_[i]  = std::make_unique<RingBuffer<Frame>>(cfg_.queueCapacity);
-        qPre2Inf_[i]  = std::make_unique<RingBuffer<Frame>>(cfg_.queueCapacity);
-        qInf2Alarm_[i] = std::make_unique<RingBuffer<DetectResult>>(cfg_.queueCapacity);
-
         Logger::info("Pipeline", "stream " + std::to_string(i) + " ready, source=" +
                      sources_[i]->name() + ", regions=" +
                      std::to_string(regions_[i].size()));
     }
+
+    if (activeStreams_ == 0) {
+        Logger::error("Pipeline", "no stream could start");
+        stop();
+        return false;
+    }
+    const size_t startedStreams = activeStreams_;
 
     /* 连接尝试最多等待约 500ms；失败后由后续告警重试。 */
     if (notifier_ && !notifier_->connect(cfg_.alarm.host, cfg_.alarm.port)) {
@@ -200,10 +219,11 @@ bool VideoPipeline::start() {
     startedAt_ = std::chrono::steady_clock::now();
     auto worker = [this](auto fn, int i) {
         try { (this->*fn)(i); }
-        catch (const std::exception& e) { failed_.store(true); Logger::error("Pipeline", e.what()); requestStop(); }
-        catch (...) { failed_.store(true); Logger::error("Pipeline", "worker exception"); requestStop(); }
+        catch (const std::exception& e) { stopStream(i, e.what()); }
+        catch (...) { stopStream(i, "worker exception"); }
     };
     for (size_t i = 0; i < n; ++i) {
+        if (!sources_[i]) continue;
         threads_.emplace_back(worker, &VideoPipeline::captureLoop, static_cast<int>(i));
         threads_.emplace_back(worker, &VideoPipeline::preprocessLoop, static_cast<int>(i));
         threads_.emplace_back(worker, &VideoPipeline::inferLoop, static_cast<int>(i));
@@ -215,7 +235,7 @@ bool VideoPipeline::start() {
         catch (...) { failed_.store(true); requestStop(); Logger::error("Pipeline", "io worker exception"); }
     });
     Logger::info("Pipeline", "pipeline started, streams=" + std::to_string(n) +
-                 ", threads=" + std::to_string(n * 4 + 1));
+                 ", threads=" + std::to_string(startedStreams * 4 + 1));
     return true;
     } catch (const std::exception& e) {
         Logger::error("Pipeline", e.what());
@@ -230,8 +250,32 @@ void VideoPipeline::requestStop() {
     for (auto& q : qCap2Pre_) if (q) q->stop();
     for (auto& q : qPre2Inf_) if (q) q->stop();
     for (auto& q : qInf2Alarm_) if (q) q->stop();
-    if (alarmTasks_) alarmTasks_->stop(cfg_.alarm.reliable && !failed_.load()); // Drain accepted tasks on normal reliable shutdown.
+    if (alarmTasks_) alarmTasks_->stop(cfg_.alarm.reliable);
     if (inferGate_) inferGate_->stop();
+}
+
+void VideoPipeline::stopStream(int idx, const std::string& reason) {
+    {
+        std::lock_guard<std::mutex> lock(statsMtx_);
+        if (!running_.load() || stoppedStreams_[idx]) return;
+        stoppedStreams_[idx] = true;
+    }
+    Logger::error("Pipeline", "stream=" + std::to_string(cfg_.streams[idx].id) +
+                 " stopped: " + reason);
+    sources_[idx]->requestStop();
+    qCap2Pre_[idx]->stop();
+    qPre2Inf_[idx]->stop();
+    qInf2Alarm_[idx]->stop();
+    // Keep the shared notifier and inference gate alive for the remaining streams.
+    bool last;
+    {
+        std::lock_guard<std::mutex> lock(statsMtx_);
+        last = --activeStreams_ == 0;
+    }
+    if (last && running_.load()) {
+        failed_.store(true);
+        requestStop();
+    }
 }
 
 void VideoPipeline::stop() {
@@ -286,10 +330,7 @@ void VideoPipeline::captureLoop(int idx) {
     while (running_.load()) {
         Frame f;
         if (!sources_[idx]->readFrame(f)) {
-            if(!running_.load())break;
-            failed_.store(true);
-            Logger::warn("Pipeline", "stream " + std::to_string(idx) + " readFrame failed/EOF");
-            requestStop();
+            stopStream(idx, "readFrame failed/EOF");
             break;
         }
         f.streamId = cfg_.streams[idx].id;
@@ -316,8 +357,8 @@ void VideoPipeline::preprocessLoop(int idx) {
 
         Frame out;
         if (!processors_[idx]->process(std::move(in), out)) {
-            Logger::error("Pipeline", "preprocess failed, stream=" + std::to_string(idx));
-            failed_.store(true);requestStop();break;
+            stopStream(idx, "preprocess failed");
+            break;
         }
         qPre2Inf_[idx]->push(std::move(out));
     }
@@ -332,6 +373,7 @@ void VideoPipeline::inferLoop(int idx) {
         if (!qPre2Inf_[idx]->pop(f)) break;
 
         std::vector<Detection> dets;
+        int personCandidates = 0;
         if (!previewOnly_) {
         /* 并发门：限制同时推理的路数（默认 2） */
         if (!inferGate_->acquire()) break;
@@ -339,9 +381,14 @@ void VideoPipeline::inferLoop(int idx) {
         try { ok = engines_[idx]->infer(f, dets); }
         catch (...) { inferGate_->release(); throw; }
         inferGate_->release();
-        if (!ok) {failed_.store(true);Logger::error("Pipeline","inference failed, stream="+std::to_string(idx));requestStop();break;}
+        if (!ok) {
+            stopStream(idx, "inference failed");
+            break;
+        }
 
         /* 手写 NMS 抑制重叠框（阈值可配置，缺省 0.45） */
+        personCandidates = static_cast<int>(std::count_if(dets.begin(), dets.end(),
+            [](const Detection& d) { return d.classId == 0; }));
         dets = nms(dets, static_cast<float>(cfg_.nmsThresh));
 
         {
@@ -354,6 +401,7 @@ void VideoPipeline::inferLoop(int idx) {
         res.streamId = f.streamId;
         res.frame = std::move(f);          /* 帧快照（告警截图用） */
         res.detections = std::move(dets);
+        res.personCandidates = personCandidates;
         qInf2Alarm_[idx]->push(std::move(res));
     }
     Logger::info("Pipeline", "infer thread exit, stream=" + std::to_string(idx));
@@ -365,10 +413,48 @@ void VideoPipeline::alarmLoop(int idx) {
     while (running_.load()) {
         DetectResult res;
         if (!qInf2Alarm_[idx]->pop(res)) break;
+        const auto now = std::chrono::steady_clock::now().time_since_epoch();
+        if (!previewOnly_) assignTracks(idx, res, static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(now).count()));
         if (observer_) observer_(res); // Before alarm handling can move the frame into a screenshot task.
         if (!previewOnly_) checkAndRaiseAlarm(idx, res);
     }
     Logger::info("Pipeline", "alarm thread exit, stream=" + std::to_string(idx));
+}
+
+void VideoPipeline::assignTracks(int idx, DetectResult& res, uint64_t now) {
+    constexpr uint64_t maxGapMs = 1000;
+    constexpr size_t maxTracks = 2048;
+    auto& tracks = tracks_[idx];
+    for (auto it = tracks.begin(); it != tracks.end();) {
+        if (now - it->second.lastSeen > maxGapMs) it = tracks.erase(it);
+        else ++it;
+    }
+    std::set<uint64_t> matched;
+    for (auto& detection : res.detections) {
+        auto best = tracks.end();
+        float overlap = 0.25f;
+        for (auto it = tracks.begin(); it != tracks.end(); ++it) {
+            if (it->second.classId != detection.classId || matched.count(it->first)) continue;
+            const float score = computeIoU(it->second.box, detection.box);
+            if (score > overlap) {
+                best = it;
+                overlap = score;
+            }
+        }
+        if (best == tracks.end()) {
+            const uint64_t id = nextTrackId_.fetch_add(1);
+            best = tracks.emplace(id, Track{detection.box, detection.classId, now, {}}).first;
+        }
+        best->second.box = detection.box;
+        best->second.lastSeen = now;
+        detection.trackId = best->first;
+        matched.insert(best->first);
+    }
+    for (auto it = tracks.begin(); tracks.size() > maxTracks && it != tracks.end();) {
+        if (!matched.count(it->first)) it = tracks.erase(it);
+        else ++it;
+    }
 }
 
 void VideoPipeline::checkAndRaiseAlarm(int idx, DetectResult& res) {
@@ -383,20 +469,13 @@ void VideoPipeline::checkAndRaiseAlarm(int idx, DetectResult& res) {
             /* 2. 闯入判断：目标中心落入多边形 */
             if (!region.containsCenter(det.box)) continue;
 
-            /* 3. 冷却去重：同一(区域,类别)在冷却期内不重复告警 */
-            auto key = std::make_tuple(idx, region.id(), det.classId);
+            /* 3. 同一目标在同一区域单独冷却。 */
+            auto& cooldown = tracks_[idx].at(det.trackId).lastAlarmByRegion;
             uint64_t now = nowMs();
             const auto cooldownNow = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch()).count());
-            {
-                std::lock_guard<std::mutex> lock(cooldownMtx_);
-                auto it = lastAlarmMs_.find(key);
-                if (it != lastAlarmMs_.end() &&
-                    cooldownNow - it->second < region.cooldownMs()) {
-                    continue;   /* 冷却期内，跳过 */
-                }
-                // Commit cooldown only after the queue accepts this task.
-            }
+            const auto previous = cooldown.find(region.id());
+            if (previous != cooldown.end() && cooldownNow - previous->second < region.cooldownMs()) continue;
 
             /* 4. 触发告警：构造任务投递给 IO 线程（本线程不做磁盘/网络 IO，
              *    避免慢速写盘阻塞告警线程、进而反压整条流水线）；
@@ -417,6 +496,7 @@ void VideoPipeline::checkAndRaiseAlarm(int idx, DetectResult& res) {
             task.info.streamId = res.streamId;
             task.info.regionId = region.id();
             task.info.classId = det.classId;
+            task.info.trackId = det.trackId;
             task.info.confidence = det.confidence;
             task.info.centerX = det.box.center().x;
             task.info.centerY = det.box.center().y;
@@ -426,10 +506,7 @@ void VideoPipeline::checkAndRaiseAlarm(int idx, DetectResult& res) {
             const auto result = alarmTasks_->tryPush(std::move(task));
             if (result == RingBuffer<AlarmTask>::PushResult::Stopped) return;
             if (result == RingBuffer<AlarmTask>::PushResult::Full) continue;
-            {
-                std::lock_guard<std::mutex> lock(cooldownMtx_);
-                lastAlarmMs_[key] = cooldownNow;
-            }
+            cooldown[region.id()] = cooldownNow;
             {
                 std::lock_guard<std::mutex> statsLock(statsMtx_);
                 ++stats_[idx].alarms; // Accepted tasks only; rejected tasks do not enter cooldown.
