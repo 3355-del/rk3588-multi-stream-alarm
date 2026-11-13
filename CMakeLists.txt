@@ -28,7 +28,8 @@ set(CORE_SOURCES
   src/hal/SimScene.cpp src/hal/MockVideoSource.cpp
   src/hal/MockFrameProcessor.cpp src/hal/MockInferenceEngine.cpp
   src/hal/DurableAlarmNotifier.cpp src/hal/TcpAlarmNotifier.cpp src/algo/Nms.cpp src/algo/PolygonRegion.cpp
-  src/algo/PngWriter.cpp src/app/Config.cpp src/app/PreviewPublisher.cpp src/pipeline/VideoPipeline.cpp)
+  src/algo/PngWriter.cpp src/app/Config.cpp src/app/PreviewPublisher.cpp src/pipeline/VideoPipeline.cpp
+  src/pipeline/VideoPipelineAlarm.cpp)
 if(MSAD_ENABLE_RKNN)
   find_package(PkgConfig REQUIRED)
   # Proprietary SDK headers/libraries are external dependencies, never vendored.

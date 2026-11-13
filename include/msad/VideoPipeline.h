@@ -68,6 +68,7 @@ private:
      * 避免慢速磁盘/网络阻塞告警线程（进而阻塞整条流水线）。
      */
     struct AlarmTask {
+        size_t streamIndex = 0;
         std::shared_ptr<const Frame> frame;                        /* 触发告警的这一帧（截图用） */
         std::vector<Detection> boxes;       /* 需在截图上标注的目标框 */
         AlarmInfo info;                     /* 告警内容（截图文件名由 IO 线程回填） */
